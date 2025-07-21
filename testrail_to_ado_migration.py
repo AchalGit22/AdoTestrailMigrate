@@ -3,6 +3,7 @@ import json
 import time
 import logging
 import base64
+import os
 from typing import Dict, List, Optional, Any
 
 # Configure logging with UTF-8 encoding support
@@ -47,14 +48,20 @@ TESTRAIL_URL = "https://as0108.testrail.io/"
 TESTRAIL_PROJECT_ID = 1
 TESTRAIL_SUITE_ID = 2
 TESTRAIL_USER = "achal01@live.in"
-TESTRAIL_API_KEY = "WscprQ3NPh7EHWRqCe4b-B8CVwzSC/8gQ7NvfwKsc"
+TESTRAIL_API_KEY = os.getenv('TESTRAIL_API_KEY', '')
 
 # Azure DevOps details
 ADO_ORG = 'amaditya902'
 ADO_PROJECT = 'TestPro'
-ADO_PAT = '1ibVmwpy5iEWOE9KVPVWS3DW7cDucaQHqAxB2MBjyswNi79xTpiJJQQJ99BGACAAAAAAAAAAAAASAZDO2Oor'
-ADO_PLAN_ID = 3
+ADO_PAT = os.getenv('ADO_PAT', '')
+ADO_PLAN_ID = 14  # Updated to use the correct test plan
 ADO_STATIC_SUITE_PARENT_ID = 4
+
+# Validate required environment variables
+if not TESTRAIL_API_KEY:
+    raise ValueError("TESTRAIL_API_KEY environment variable is required")
+if not ADO_PAT:
+    raise ValueError("ADO_PAT environment variable is required")
 
 # Rate limiting
 REQUEST_DELAY = 1  # seconds between requests
