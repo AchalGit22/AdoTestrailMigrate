@@ -2,18 +2,44 @@ import requests
 import json
 import time
 import logging
+import base64
 from typing import Dict, List, Optional, Any
 
-# Configure logging
+# Configure logging with UTF-8 encoding support
+import sys
+import os
+
+# Set console encoding to UTF-8 if on Windows
+if os.name == 'nt':
+    # Windows: Configure stdout/stderr for UTF-8
+    if hasattr(sys.stdout, 'reconfigure'):
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+        sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+    else:
+        # Fallback for older Python versions
+        import codecs
+        sys.stdout = codecs.getwriter('utf-8')(sys.stdout.buffer, errors='replace')
+        sys.stderr = codecs.getwriter('utf-8')(sys.stderr.buffer, errors='replace')
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('migration.log'),
+        logging.FileHandler('migration.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
 logger = logging.getLogger(__name__)
+
+# Unicode fallback function for cross-platform compatibility
+def safe_log(level, message):
+    """Safely log messages with Unicode fallback"""
+    try:
+        getattr(logger, level)(message)
+    except UnicodeEncodeError:
+        # Fallback: replace Unicode characters with ASCII equivalents
+        safe_message = message.replace('✅', '[SUCCESS]').replace('❌', '[ERROR]').replace('⚠️', '[WARNING]')
+        getattr(logger, level)(safe_message)
 
 # === CONFIGURATION ===
 # TestRail details
@@ -36,8 +62,12 @@ REQUEST_DELAY = 1  # seconds between requests
 # === HEADERS ===
 testrail_auth = (TESTRAIL_USER, TESTRAIL_API_KEY)
 ado_auth = ('', ADO_PAT)
+
+# Create proper Basic Auth header for Azure DevOps
+credentials = base64.b64encode(f":{ADO_PAT}".encode()).decode()
 ado_headers = {
-    'Content-Type': 'application/json'
+    'Content-Type': 'application/json',
+    'Authorization': f'Basic {credentials}'
 }
 
 class TestRailMigrator:
@@ -125,7 +155,7 @@ class TestRailMigrator:
         url = f"https://dev.azure.com/{ADO_ORG}/{ADO_PROJECT}/_apis/test/plans/{ADO_PLAN_ID}/suites/{parent_id}/suites?api-version=6.0"
         
         try:
-            response = self.make_request('GET', url, ado_auth)
+            response = self.make_request('GET', url, ado_auth, ado_headers)
             if response.status_code == 200:
                 suites = response.json().get("value", [])
                 for suite in suites:
@@ -133,6 +163,11 @@ class TestRailMigrator:
                     if key not in self.existing_suites:
                         self.existing_suites[key] = suite['id']
                         self.fetch_ado_suites(suite['id'])  # Recursively fetch child suites
+            elif response.status_code == 401:
+                logger.error(f"Authentication failed for ADO API. Please check your PAT token and permissions.")
+                logger.error(f"Response: {response.status_code} - {response.text}")
+            else:
+                logger.warning(f"Failed to fetch suites: {response.status_code} - {response.text}")
         except Exception as e:
             logger.warning(f"Error fetching child suites for parent {parent_id}: {e}")
     
@@ -152,12 +187,15 @@ class TestRailMigrator:
             suite_data = response.json()
             if 'id' in suite_data:
                 suite_id = suite_data['id']
-                logger.info(f"✅ Created suite '{section_name}' with ID: {suite_id}")
+                safe_log('info', f"✅ Created suite '{section_name}' with ID: {suite_id}")
                 key = (self.normalize_suite_name(section_name), parent_id)
                 self.existing_suites[key] = suite_id
                 return suite_id
-        
-        logger.error(f"❌ Failed to create suite '{section_name}': {response.status_code} - {response.text}")
+        elif response.status_code == 401:
+            safe_log('error', f"❌ Authentication failed when creating suite '{section_name}'. Please check your PAT token and permissions.")
+            logger.error(f"Response: {response.status_code} - {response.text}")
+        else:
+            safe_log('error', f"❌ Failed to create suite '{section_name}': {response.status_code} - {response.text}")
         return None
     
     def format_steps(self, steps_data: str) -> str:
@@ -252,7 +290,10 @@ class TestRailMigrator:
         
         # Create the work item
         url = f"https://dev.azure.com/{ADO_ORG}/{ADO_PROJECT}/_apis/wit/workitems/$Test%20Case?api-version=6.0"
-        headers = {"Content-Type": "application/json-patch+json"}
+        headers = {
+            "Content-Type": "application/json-patch+json",
+            "Authorization": ado_headers["Authorization"]
+        }
         
         response = self.make_request('POST', url, ado_auth, headers, work_item_payload)
         
@@ -291,10 +332,44 @@ class TestRailMigrator:
         logger.info(f"✅ Added test case {test_case_id} to suite {suite_id}")
         return True
     
+    def test_ado_authentication(self) -> bool:
+        """Test Azure DevOps authentication and permissions"""
+        logger.info("Testing Azure DevOps authentication...")
+        
+        # Test basic project access
+        url = f"https://dev.azure.com/{ADO_ORG}/{ADO_PROJECT}/_apis/projects/{ADO_PROJECT}?api-version=6.0"
+        response = self.make_request('GET', url, ado_auth, ado_headers)
+        
+        if response.status_code == 401:
+            logger.error("❌ Authentication failed. Please check your Personal Access Token (PAT).")
+            logger.error("Make sure your PAT has the following permissions:")
+            logger.error("- Test management (read & write)")
+            logger.error("- Work items (read & write)")
+            return False
+        elif response.status_code != 200:
+            logger.error(f"❌ Failed to access project: {response.status_code} - {response.text}")
+            return False
+        
+        # Test test plan access
+        url = f"https://dev.azure.com/{ADO_ORG}/{ADO_PROJECT}/_apis/test/plans/{ADO_PLAN_ID}?api-version=6.0"
+        response = self.make_request('GET', url, ado_auth, ado_headers)
+        
+        if response.status_code != 200:
+            logger.error(f"❌ Failed to access test plan {ADO_PLAN_ID}: {response.status_code} - {response.text}")
+            return False
+        
+        logger.info("✅ Azure DevOps authentication successful!")
+        return True
+    
     def migrate(self):
         """Main migration method"""
         try:
             logger.info("Starting TestRail to ADO migration...")
+            
+            # Test ADO authentication first
+            if not self.test_ado_authentication():
+                logger.error("❌ Migration aborted due to authentication failure.")
+                return
             
             # Fetch data from TestRail
             sections = self.fetch_sections()
